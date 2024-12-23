@@ -70,6 +70,10 @@
             "OpenCvSharp4.runtime.win": {
               "target": "Package",
               "version": "[4.10.0.20241108, )"
+            },
+            "System.Drawing.Common": {
+              "target": "Package",
+              "version": "[9.0.0, )"
             }
           },
           "imports": [

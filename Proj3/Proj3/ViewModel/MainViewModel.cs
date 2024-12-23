@@ -5,6 +5,8 @@ using System.Windows.Media.Imaging;
 using System.Windows.Input;
 using Microsoft.Win32;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace Proj3.ViewModel
 {
@@ -14,8 +16,8 @@ namespace Proj3.ViewModel
         private BitmapSource _displayImage;
         private Mat _currentImage;
         private VideoCapture _videoCapture;
-        private Timer _timer;
-        private int _currentFrameIndex = 0;
+        private System.Timers.Timer _timer;
+        private InkCanvas _inkCanvas;
 
 
         public MainViewModel()
@@ -24,7 +26,16 @@ namespace Proj3.ViewModel
             DrawingBtn = new Command.Command(SetDrawingMode);
             ErasorBtn = new Command.Command(SetErasingMode);
             SaveBtn = new Command.Command(SaveImage);
+        }
 
+        public InkCanvas InkCanvas
+        {
+            get => _inkCanvas;
+            set
+            {
+                _inkCanvas = value;
+                OnPropertyChanged(nameof(InkCanvas));
+            }
         }
 
         public string FilePath
@@ -59,6 +70,24 @@ namespace Proj3.ViewModel
 
         private void OpenFile(object parameter)
         {
+            // 기존 리소스 정리
+            if (_videoCapture != null)
+            {
+                _videoCapture.Release(); // VideoCapture 해제
+                _videoCapture = null;
+            }
+            if (_timer != null)
+            {
+                _timer.Stop(); // 타이머 중지
+                _timer.Dispose(); // 타이머 해제
+                _timer = null;
+            }
+            if (_currentImage != null)
+            {
+                _currentImage.Dispose(); // Mat 해제
+                _currentImage = null;
+            }
+
             OpenFileDialog openFileDialog = new OpenFileDialog
             {
                 Filter = "Image and Video Files|*.jpg;*.png;*.bmp;*.mp4;*.avi"
@@ -70,17 +99,19 @@ namespace Proj3.ViewModel
 
                 try
                 {
-                    // 확장자를 기반으로 이미지와 동영상을 구분
                     string extension = System.IO.Path.GetExtension(FilePath).ToLower();
                     if (extension == ".jpg" || extension == ".png" || extension == ".bmp")
                     {
                         // 이미지 파일 로드
-                        _currentImage = Cv2.ImRead(FilePath);
+                        Mat image = Cv2.ImRead(FilePath);
 
-                        if (_currentImage != null && !_currentImage.Empty())
+                        if (image != null && !image.Empty())
                         {
-                            // 화면에 표시
-                            UpdateDisplayImage();
+                            _currentImage = image;
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                DisplayImage = MatToBitmapSource(_currentImage);
+                            });
                         }
                         else
                         {
@@ -90,23 +121,31 @@ namespace Proj3.ViewModel
                     else if (extension == ".mp4" || extension == ".avi")
                     {
                         // 동영상 파일 로드
-                        VideoCapture videoCapture = new VideoCapture(FilePath);
-                        if (videoCapture.IsOpened())
-                        {
-                            // 동영상 첫 프레임 읽기
-                            Mat firstFrame = new Mat();
-                            videoCapture.Read(firstFrame);
+                        _videoCapture = new VideoCapture(FilePath);
 
-                            if (firstFrame != null && !firstFrame.Empty())
+                        if (_videoCapture.IsOpened())
+                        {
+                            Mat frame = new Mat();
+                            _timer = new System.Timers.Timer(33); // 약 30FPS
+
+                            _timer.Elapsed += (sender, e) =>
                             {
-                                _currentImage = firstFrame;
-                                // 화면에 첫 프레임 표시
-                                UpdateDisplayImage();
-                            }
-                            else
-                            {
-                                throw new Exception("동영상의 첫 프레임을 로드하지 못했습니다.");
-                            }
+                                // 동영상의 프레임을 읽어 화면에 표시
+                                if (_videoCapture.Read(frame) && !frame.Empty())
+                                {
+                                    _currentImage = frame;
+                                    Application.Current.Dispatcher.Invoke(() =>
+                                    {
+                                        DisplayImage = MatToBitmapSource(_currentImage);
+                                    });
+                                }
+                                else
+                                {
+                                    // 동영상 끝났을 때 자동으로 처음으로 돌아가서 다시 재생
+                                    _videoCapture.Set(VideoCaptureProperties.PosFrames, 0);  // 처음으로 돌아가기
+                                }
+                            };
+                            _timer.Start();  // 타이머 시작
                         }
                         else
                         {
@@ -125,6 +164,19 @@ namespace Proj3.ViewModel
             }
         }
 
+
+        private InkCanvasEditingMode _inkCanvasEditingMode = InkCanvasEditingMode.None;
+
+        public InkCanvasEditingMode InkCanvasEditingMode
+        {
+            get => _inkCanvasEditingMode;
+            set
+            {
+                _inkCanvasEditingMode = value;
+                OnPropertyChanged(nameof(InkCanvasEditingMode));
+            }
+        }
+
         private void UpdateDisplayImage()
         {
             if (_currentImage != null)
@@ -137,6 +189,7 @@ namespace Proj3.ViewModel
         {
             if (_currentImage != null)
             {
+                InkCanvasEditingMode = InkCanvasEditingMode.Ink;
                 UpdateDisplayImage();
             }
         }
@@ -145,8 +198,7 @@ namespace Proj3.ViewModel
         {
             if (_currentImage != null)
             {
-                // OpenCV를 사용해 지우기 효과 (예: 전체 초기화)
-                _currentImage.SetTo(new Scalar(255, 255, 255));
+                InkCanvasEditingMode = InkCanvasEditingMode.EraseByPoint;
                 UpdateDisplayImage();
             }
         }
@@ -155,8 +207,20 @@ namespace Proj3.ViewModel
         {
             if (_currentImage != null)
             {
+                // InkCanvas에 그린 내용을 비트맵으로 캡처
+                RenderTargetBitmap inkCanvasBitmap = new RenderTargetBitmap((int)_currentImage.Width, (int)_currentImage.Height, 96, 96, PixelFormats.Pbgra32);
+                inkCanvasBitmap.Render(_inkCanvas);  
+
+                // InkCanvas의 내용을 Mat로 변환
+                BitmapSource combinedImage = inkCanvasBitmap;
+                Mat inkCanvasMat = BitmapSourceConverter.ToMat(combinedImage);
+
+                // 원본 이미지와 InkCanvas 그림을 합침
+                Mat finalImage = _currentImage.Clone();  // 원본 이미지 복사
+                Cv2.AddWeighted(finalImage, 1.0, inkCanvasMat, 1.0, 0.0, finalImage);  // 그림 합치기
+
                 // 저장 경로 설정
-                var saveFileDialog = new Microsoft.Win32.SaveFileDialog
+                var saveFileDialog = new SaveFileDialog
                 {
                     Filter = "Image Files|*.jpg;*.png;*.bmp",
                     DefaultExt = "jpg"
@@ -164,7 +228,19 @@ namespace Proj3.ViewModel
 
                 if (saveFileDialog.ShowDialog() == true)
                 {
-                    Cv2.ImWrite(saveFileDialog.FileName, _currentImage);
+                    try
+                    {
+                        string extension = System.IO.Path.GetExtension(saveFileDialog.FileName).ToLower();
+
+                        // 최종 이미지를 저장
+                        Cv2.ImWrite(saveFileDialog.FileName, finalImage);
+
+                        MessageBox.Show("파일이 성공적으로 저장되었습니다.", "저장 완료", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"파일 저장 중 오류가 발생했습니다: {ex.Message}", "오류", MessageBoxButton.OK, MessageBoxImage.Error);
+                    }
                 }
             }
         }
